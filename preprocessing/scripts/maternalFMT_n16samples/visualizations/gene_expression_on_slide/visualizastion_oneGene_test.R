@@ -1,0 +1,1426 @@
+#!/usr/bin/env Rscript
+
+# ==============================================================================
+# 05_Penk_logNormalized_spatial_maps_n16_meanSD_toggleImage_rotationFix.R
+#
+# Purpose:
+# - visualize Penk expression in 16 accepted maternal FMT Visium samples
+# - allow a top-level TRUE/FALSE switch deciding whether histology is shown
+# - add a separate TRUE/FALSE switch controlling 90-degree rotation in the
+#   no-image mode
+# - when histology is NOT shown, use true Space Ranger pixel coordinates
+#   (scaled to the chosen image resolution) WITHOUT displaying the image,
+#   so the geometry is preserved and circles do not become ellipses
+# - use one common colour scale across all 16 samples
+# - arrange panels into 4 fixed columns:
+#     1. Male Neurotypical
+#     2. Male ASD
+#     3. Female Neurotypical
+#     4. Female ASD
+# - allow different numbers of samples per column by filling missing cells
+#   with blank spacers
+# - report, for each sample:
+#     * percentage of Penk-positive tissue spots
+#     * mean +/- SD of log-normalized Penk across ALL tissue spots,
+#       including spots with zero Penk counts
+# - save:
+#     1. combined PDF
+#     2. one PNG per sample
+#     3. summary TSV
+#
+# Notes:
+# - in the no-image mode, point positions are based on scaled Space Ranger
+#   pixel coordinates, but the histology image itself is not drawn.
+# - this avoids distortion caused by treating array_row/array_col as if they
+#   were equal Cartesian units.
+# - Per-spot normalization is:
+#     log1p(gene_count / total_UMI_in_spot * 10000)
+# - total UMI is always calculated from ALL genes
+# ==============================================================================
+
+
+# ==============================================================================
+# 1. Packages
+# ==============================================================================
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Matrix)
+  library(dplyr)
+  library(tibble)
+  library(ggplot2)
+  library(patchwork)
+  library(scales)
+  library(png)
+  library(jsonlite)
+  library(grid)
+})
+
+
+# ==============================================================================
+# 2. User settings
+# ==============================================================================
+
+project_dir <- "/home/mateusz/projects/ippas-kunevicius-spatial"
+
+path_to_data <- file.path(
+  project_dir,
+  "data",
+  "spacerangerCount_withoutJSON_GRCm39-2024-A_2026-03-28"
+)
+
+metadata_file <- file.path(
+  project_dir,
+  "data",
+  "metadata_autismFMT.tsv"
+)
+
+output_dir <- file.path(
+  project_dir,
+  "results",
+  "maternalFMT_n16samples",
+  "geneExpression_visualtionSlide",
+  "test_visualisation"
+)
+
+# --------------------------------------------------------------------------
+# Main switches
+# --------------------------------------------------------------------------
+
+target_gene <- "Arc"
+
+# FALSE = lightweight mode, no histology image, common slide-like frame
+# TRUE  = include histology image in the background
+show_histology_image <- FALSE
+
+# FALSE = preserve original Space Ranger orientation
+# TRUE  = rotate the no-image view by 90 degrees clockwise
+rotate_no_image_90 <- FALSE
+
+normalization_scale_factor <- 10000
+upper_colour_quantile <- 0.99
+
+# --------------------------------------------------------------------------
+# Plot appearance
+# --------------------------------------------------------------------------
+
+number_of_columns <- 4
+combined_pdf_width_inches <- 18
+combined_pdf_height_inches <- 23
+
+individual_png_width_inches <- 6
+individual_png_height_inches <- 5.9
+individual_png_dpi <- 300
+
+point_size_no_image <- 1.1
+point_size_with_image <- 0.80
+
+panel_padding_fraction_no_image <- 0.03
+panel_padding_fraction_with_image <- 0.03
+
+panel_border_linewidth <- 0.8
+
+# Warm palette:
+# zero = grey
+# then warm colours only
+palette_colors <- c(
+  "#D9D9D9",
+  "#FFF7BC",
+  "#FEC44F",
+  "#FE9929",
+  "#EC7014",
+  "#CC4C02",
+  "#990000"
+)
+
+# --------------------------------------------------------------------------
+# Samples
+# --------------------------------------------------------------------------
+
+selected_samples <- c(
+  "1_1F",
+  "1_1Fd",
+  "1_1M",
+  "2_1M",
+  "2_1Md",
+  "3_1F",
+  "3_1M",
+  "5_1M",
+  "5_3F",
+  "12_1M",
+  "13_1F",
+  "13_1M",
+  "15_1F",
+  "18_1F",
+  "18_1M",
+  "23_1F"
+)
+
+excluded_samples <- c(
+  "12_3F",
+  "15_1M",
+  "20_1F",
+  "20_3M"
+)
+
+expected_counts_by_column <- c(
+  male_neurotypical = 3,
+  male_asd = 5,
+  female_neurotypical = 3,
+  female_asd = 5
+)
+
+
+# ==============================================================================
+# 3. Check paths and create output
+# ==============================================================================
+
+if (!dir.exists(project_dir)) {
+  stop("Project directory does not exist: ", project_dir)
+}
+
+if (!dir.exists(path_to_data)) {
+  stop("Space Ranger data directory does not exist: ", path_to_data)
+}
+
+if (!file.exists(metadata_file)) {
+  stop("Metadata file does not exist: ", metadata_file)
+}
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+mode_label <- if (show_histology_image) {
+  "withHistology"
+} else if (rotate_no_image_90) {
+  "noHistology_pixelFrame_rotated90"
+} else {
+  "noHistology_pixelFrame"
+}
+
+individual_png_dir <- file.path(
+  output_dir,
+  paste0(target_gene, "_individual_png_", mode_label)
+)
+
+dir.create(
+  individual_png_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+output_pdf <- file.path(
+  output_dir,
+  paste0(
+    "05_",
+    target_gene,
+    "_logNormalized_spatialMaps_n16_",
+    mode_label,
+    "_fourColumnsSexGroup.pdf"
+  )
+)
+
+output_summary_tsv <- file.path(
+  output_dir,
+  paste0(
+    "05_",
+    target_gene,
+    "_logNormalized_spatialMaps_n16_",
+    mode_label,
+    "_summary.tsv"
+  )
+)
+
+message("Target gene: ", target_gene)
+message("Show histology image: ", show_histology_image)
+message("Rotate no-image mode by 90 degrees: ", rotate_no_image_90)
+message("Rotate no-image mode by 90 degrees: ", rotate_no_image_90)
+message("Output directory: ", output_dir)
+message("Selected samples: ", paste(selected_samples, collapse = ", "))
+message("Excluded samples: ", paste(excluded_samples, collapse = ", "))
+
+
+# ==============================================================================
+# 4. Helper functions
+# ==============================================================================
+
+choose_matrix_file <- function(outs_dir) {
+
+  candidate_files <- c(
+    file.path(outs_dir, "filtered_feature_bc_matrix.h5"),
+    file.path(outs_dir, "raw_feature_bc_matrix.h5")
+  )
+
+  existing_files <- candidate_files[file.exists(candidate_files)]
+
+  if (length(existing_files) == 0) {
+    stop(
+      "Neither filtered_feature_bc_matrix.h5 nor raw_feature_bc_matrix.h5 exists in: ",
+      outs_dir
+    )
+  }
+
+  existing_files[[1]]
+}
+
+
+choose_tissue_positions_file <- function(spatial_dir) {
+
+  candidate_files <- c(
+    file.path(spatial_dir, "tissue_positions.csv"),
+    file.path(spatial_dir, "tissue_positions_list.csv")
+  )
+
+  existing_files <- candidate_files[file.exists(candidate_files)]
+
+  if (length(existing_files) == 0) {
+    stop("No tissue positions file found in: ", spatial_dir)
+  }
+
+  existing_files[[1]]
+}
+
+
+read_tissue_positions <- function(filename) {
+
+  if (basename(filename) == "tissue_positions.csv") {
+    coordinates <- read.csv(
+      filename,
+      header = TRUE,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  } else {
+    coordinates <- read.csv(
+      filename,
+      header = FALSE,
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      col.names = c(
+        "barcode",
+        "in_tissue",
+        "array_row",
+        "array_col",
+        "pxl_row_in_fullres",
+        "pxl_col_in_fullres"
+      )
+    )
+  }
+
+  required_columns <- c(
+    "barcode",
+    "in_tissue",
+    "array_row",
+    "array_col",
+    "pxl_row_in_fullres",
+    "pxl_col_in_fullres"
+  )
+
+  missing_columns <- setdiff(required_columns, colnames(coordinates))
+
+  if (length(missing_columns) > 0) {
+    stop(
+      "Missing columns in ",
+      filename,
+      ": ",
+      paste(missing_columns, collapse = ", ")
+    )
+  }
+
+  coordinates |>
+    transmute(
+      barcode = trimws(as.character(barcode)),
+      in_tissue = as.integer(in_tissue),
+      array_row = as.numeric(array_row),
+      array_col = as.numeric(array_col),
+      pxl_row_in_fullres = as.numeric(pxl_row_in_fullres),
+      pxl_col_in_fullres = as.numeric(pxl_col_in_fullres)
+    )
+}
+
+
+extract_gene_expression_matrix <- function(read10x_result) {
+
+  if (inherits(read10x_result, "Matrix") || is.matrix(read10x_result)) {
+    return(read10x_result)
+  }
+
+  if (!is.list(read10x_result)) {
+    stop("Read10X_h5 returned an unsupported object type.")
+  }
+
+  if ("Gene Expression" %in% names(read10x_result)) {
+    return(read10x_result[["Gene Expression"]])
+  }
+
+  if (length(read10x_result) == 1) {
+    return(read10x_result[[1]])
+  }
+
+  stop(
+    "Read10X_h5 returned multiple matrices, but 'Gene Expression' could not be identified."
+  )
+}
+
+
+find_target_gene <- function(feature_names, requested_gene) {
+
+  exact_index <- which(feature_names == requested_gene)
+  if (length(exact_index) == 1) {
+    return(exact_index)
+  }
+
+  ci_index <- which(tolower(feature_names) == tolower(requested_gene))
+  if (length(ci_index) == 1) {
+    warning(
+      "Gene ",
+      requested_gene,
+      " matched case-insensitively as ",
+      feature_names[ci_index]
+    )
+    return(ci_index)
+  }
+
+  similar_features <- grep(
+    requested_gene,
+    feature_names,
+    ignore.case = TRUE,
+    value = TRUE
+  )
+
+  stop(
+    "Target gene was not found: ",
+    requested_gene,
+    if (length(similar_features) > 0) {
+      paste0(
+        "\nSimilar feature names: ",
+        paste(head(similar_features, 20), collapse = ", ")
+      )
+    } else {
+      ""
+    }
+  )
+}
+
+
+format_metadata_value <- function(x) {
+  if (length(x) == 0 || is.na(x) || trimws(as.character(x)) == "") {
+    return("NA")
+  }
+  as.character(x)
+}
+
+
+standardize_sex <- function(x) {
+
+  x_lower <- tolower(trimws(as.character(x)))
+
+  if (x_lower %in% c("m", "male")) {
+    return("Male")
+  }
+
+  if (x_lower %in% c("f", "female")) {
+    return("Female")
+  }
+
+  stop("Unsupported sex label: ", x)
+}
+
+
+standardize_group <- function(x) {
+
+  x_lower <- tolower(trimws(as.character(x)))
+
+  if (grepl("asd|autism", x_lower)) {
+    return("ASD")
+  }
+
+  if (grepl("neurotypical|control|typical|nt", x_lower)) {
+    return("Neurotypical")
+  }
+
+  stop(
+    "Unsupported donor-group label: ",
+    x,
+    "\nExpected something matching ASD/autism or neurotypical/control."
+  )
+}
+
+
+compute_square_limits <- function(xmin, xmax, ymin, ymax, padding_fraction = 0.03) {
+
+  x_range <- xmax - xmin
+  y_range <- ymax - ymin
+  max_range <- max(x_range, y_range)
+
+  if (!is.finite(max_range) || max_range <= 0) {
+    max_range <- 1
+  }
+
+  half_side <- (max_range / 2) * (1 + padding_fraction)
+  x_center <- (xmin + xmax) / 2
+  y_center <- (ymin + ymax) / 2
+
+  list(
+    x_limits = c(x_center - half_side, x_center + half_side),
+    y_limits = c(y_center - half_side, y_center + half_side)
+  )
+}
+
+
+choose_image_file_and_scale <- function(spatial_dir) {
+
+  image_candidates <- c(
+    file.path(spatial_dir, "tissue_lowres_image.png"),
+    file.path(spatial_dir, "tissue_hires_image.png")
+  )
+
+  image_file <- image_candidates[file.exists(image_candidates)][1]
+
+  if (is.na(image_file) || length(image_file) == 0) {
+    stop("No tissue image PNG found in: ", spatial_dir)
+  }
+
+  scalefactors_file <- file.path(spatial_dir, "scalefactors_json.json")
+  if (!file.exists(scalefactors_file)) {
+    stop("scalefactors_json.json not found in: ", spatial_dir)
+  }
+
+  scalefactors <- jsonlite::fromJSON(scalefactors_file)
+
+  if (basename(image_file) == "tissue_lowres_image.png") {
+    scale_factor <- scalefactors$tissue_lowres_scalef
+  } else {
+    scale_factor <- scalefactors$tissue_hires_scalef
+  }
+
+  if (!is.numeric(scale_factor) || length(scale_factor) != 1 || is.na(scale_factor)) {
+    stop("Could not determine image scale factor for: ", image_file)
+  }
+
+  image_array <- png::readPNG(image_file)
+  image_height <- dim(image_array)[1]
+  image_width <- dim(image_array)[2]
+  rm(image_array)
+
+  list(
+    image_file = image_file,
+    scale_factor = scale_factor,
+    image_width = image_width,
+    image_height = image_height
+  )
+}
+
+
+make_column_key <- function(sex_std, group_std) {
+
+  if (sex_std == "Male" && group_std == "Neurotypical") {
+    return("male_neurotypical")
+  }
+
+  if (sex_std == "Male" && group_std == "ASD") {
+    return("male_asd")
+  }
+
+  if (sex_std == "Female" && group_std == "Neurotypical") {
+    return("female_neurotypical")
+  }
+
+  if (sex_std == "Female" && group_std == "ASD") {
+    return("female_asd")
+  }
+
+  stop(
+    "Unsupported sex/group combination: ",
+    sex_std,
+    " / ",
+    group_std
+  )
+}
+
+
+make_plot_title_line <- function(plot_data) {
+  paste0(
+    "Sample: ",
+    plot_data$sample_ID[[1]]
+  )
+}
+
+
+make_plot_subtitle_line <- function(plot_data) {
+
+  n_positive <- sum(plot_data$target_raw_count > 0)
+  percent_positive <- 100 * mean(plot_data$target_raw_count > 0)
+
+  mean_expression_all_spots <- mean(
+    plot_data$logNormalized_expression,
+    na.rm = TRUE
+  )
+
+  sd_expression_all_spots <- sd(
+    plot_data$logNormalized_expression,
+    na.rm = TRUE
+  )
+
+  paste0(
+    "Group: ",
+    format_metadata_value(plot_data$group_std[[1]]),
+    " | Sex: ",
+    format_metadata_value(plot_data$sex_std[[1]]),
+    "\nTissue spots: ",
+    format(nrow(plot_data), big.mark = " ", scientific = FALSE),
+    " | ",
+    target_gene,
+    "+: ",
+    format(n_positive, big.mark = " ", scientific = FALSE),
+    " (",
+    format(round(percent_positive, 1), nsmall = 1),
+    "%)",
+    "\nMean ± SD (all spots): ",
+    format(round(mean_expression_all_spots, 3), nsmall = 3, trim = TRUE),
+    " ± ",
+    format(round(sd_expression_all_spots, 3), nsmall = 3, trim = TRUE)
+  )
+}
+
+
+# ==============================================================================
+# 5. Read metadata and define sample order
+# ==============================================================================
+
+metadata_autismFMT <- read.delim(
+  metadata_file,
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+required_metadata_columns <- c(
+  "sample_ID",
+  "fmt_donor_group",
+  "sex"
+)
+
+missing_metadata_columns <- setdiff(
+  required_metadata_columns,
+  colnames(metadata_autismFMT)
+)
+
+if (length(missing_metadata_columns) > 0) {
+  stop(
+    "Missing metadata columns: ",
+    paste(missing_metadata_columns, collapse = ", ")
+  )
+}
+
+sample_table <- metadata_autismFMT |>
+  transmute(
+    sample_ID = trimws(as.character(sample_ID)),
+    donor_group_raw = trimws(as.character(fmt_donor_group)),
+    sex_raw = trimws(as.character(sex))
+  ) |>
+  filter(
+    !is.na(sample_ID),
+    sample_ID != "",
+    sample_ID %in% selected_samples
+  ) |>
+  distinct(sample_ID, .keep_all = TRUE)
+
+missing_selected_samples <- setdiff(selected_samples, sample_table$sample_ID)
+
+if (length(missing_selected_samples) > 0) {
+  stop(
+    "Selected samples are missing in metadata: ",
+    paste(missing_selected_samples, collapse = ", ")
+  )
+}
+
+sample_table <- tibble(
+  sample_ID = selected_samples
+) |>
+  left_join(sample_table, by = "sample_ID") |>
+  mutate(
+    sex_std = vapply(sex_raw, standardize_sex, character(1)),
+    group_std = vapply(donor_group_raw, standardize_group, character(1)),
+    column_key = mapply(make_column_key, sex_std, group_std)
+  )
+
+if (anyDuplicated(sample_table$sample_ID) > 0) {
+  stop("Duplicated sample IDs were detected in sample_table.")
+}
+
+message("")
+message("Sample assignment:")
+print(
+  sample_table |>
+    select(sample_ID, sex_raw, donor_group_raw, sex_std, group_std, column_key),
+  n = Inf,
+  width = Inf
+)
+
+observed_counts_by_column <- table(sample_table$column_key)
+
+message("")
+message("Observed counts by requested column layout:")
+print(observed_counts_by_column)
+
+for (key in names(expected_counts_by_column)) {
+  observed_n <- if (key %in% names(observed_counts_by_column)) {
+    as.integer(observed_counts_by_column[[key]])
+  } else {
+    0L
+  }
+
+  expected_n <- expected_counts_by_column[[key]]
+
+  if (observed_n != expected_n) {
+    warning(
+      "Column '",
+      key,
+      "' has ",
+      observed_n,
+      " samples, but ",
+      expected_n,
+      " were expected."
+    )
+  }
+}
+
+
+# ==============================================================================
+# 6. Process samples one at a time
+# ==============================================================================
+
+sample_plot_data <- vector("list", length(selected_samples))
+names(sample_plot_data) <- selected_samples
+
+sample_summary <- vector("list", length(selected_samples))
+names(sample_summary) <- selected_samples
+
+image_info_list <- vector("list", length(selected_samples))
+names(image_info_list) <- selected_samples
+
+for (sample_id in selected_samples) {
+
+  message("")
+  message("============================================================")
+  message("Processing sample: ", sample_id)
+  message("============================================================")
+
+  sample_outs_dir <- file.path(path_to_data, sample_id, "outs")
+  spatial_dir <- file.path(sample_outs_dir, "spatial")
+
+  if (!dir.exists(sample_outs_dir)) {
+    stop("Missing outs directory for sample ", sample_id, ": ", sample_outs_dir)
+  }
+
+  if (!dir.exists(spatial_dir)) {
+    stop("Missing spatial directory for sample ", sample_id, ": ", spatial_dir)
+  }
+
+  matrix_file <- choose_matrix_file(sample_outs_dir)
+  positions_file <- choose_tissue_positions_file(spatial_dir)
+
+  coordinates <- read_tissue_positions(positions_file) |>
+    filter(
+      !is.na(barcode),
+      barcode != "",
+      in_tissue == 1
+    )
+
+  if (nrow(coordinates) == 0) {
+    stop("No in-tissue spots found for sample: ", sample_id)
+  }
+
+  read10x_result <- Seurat::Read10X_h5(
+    filename = matrix_file,
+    use.names = TRUE,
+    unique.features = TRUE
+  )
+
+  counts <- extract_gene_expression_matrix(read10x_result)
+  rm(read10x_result)
+
+  if (nrow(counts) == 0 || ncol(counts) == 0) {
+    stop("Empty count matrix for sample: ", sample_id)
+  }
+
+  common_barcodes <- coordinates$barcode[
+    coordinates$barcode %in% colnames(counts)
+  ]
+
+  if (length(common_barcodes) == 0) {
+    stop("No shared barcodes between coordinates and matrix for sample: ", sample_id)
+  }
+
+  coordinates <- coordinates |>
+    filter(barcode %in% common_barcodes) |>
+    arrange(match(barcode, common_barcodes))
+
+  counts <- counts[, coordinates$barcode, drop = FALSE]
+
+  if (!identical(colnames(counts), coordinates$barcode)) {
+    stop("Barcode order mismatch for sample: ", sample_id)
+  }
+
+  target_gene_index <- find_target_gene(
+    feature_names = rownames(counts),
+    requested_gene = target_gene
+  )
+
+  target_gene_name_in_matrix <- rownames(counts)[target_gene_index]
+
+  total_umi_per_spot <- Matrix::colSums(counts)
+  target_raw_counts <- as.numeric(counts[target_gene_index, , drop = TRUE])
+
+  log_normalized_expression <- numeric(length(total_umi_per_spot))
+  valid_spots <- total_umi_per_spot > 0
+
+  log_normalized_expression[valid_spots] <- log1p(
+    target_raw_counts[valid_spots] /
+      total_umi_per_spot[valid_spots] *
+      normalization_scale_factor
+  )
+
+  sample_metadata <- sample_table |>
+    filter(sample_ID == sample_id)
+
+  if (nrow(sample_metadata) != 1) {
+    stop("Expected one metadata row for sample ", sample_id)
+  }
+
+  plot_data <- coordinates |>
+    mutate(
+      sample_ID = sample_id,
+      donor_group_raw = sample_metadata$donor_group_raw[[1]],
+      sex_raw = sample_metadata$sex_raw[[1]],
+      group_std = sample_metadata$group_std[[1]],
+      sex_std = sample_metadata$sex_std[[1]],
+      column_key = sample_metadata$column_key[[1]],
+      target_gene = target_gene_name_in_matrix,
+      target_raw_count = target_raw_counts,
+      total_UMI = as.numeric(total_umi_per_spot),
+      logNormalized_expression = log_normalized_expression
+    ) |>
+    select(
+      sample_ID,
+      donor_group_raw,
+      sex_raw,
+      group_std,
+      sex_std,
+      column_key,
+      barcode,
+      in_tissue,
+      array_row,
+      array_col,
+      pxl_row_in_fullres,
+      pxl_col_in_fullres,
+      target_gene,
+      target_raw_count,
+      total_UMI,
+      logNormalized_expression
+    )
+
+  sample_plot_data[[sample_id]] <- plot_data
+
+  image_info_list[[sample_id]] <- choose_image_file_and_scale(spatial_dir)
+
+  sample_summary[[sample_id]] <- tibble(
+    sample_ID = sample_id,
+    donor_group_raw = sample_metadata$donor_group_raw[[1]],
+    sex_raw = sample_metadata$sex_raw[[1]],
+    group_std = sample_metadata$group_std[[1]],
+    sex_std = sample_metadata$sex_std[[1]],
+    column_key = sample_metadata$column_key[[1]],
+    matrix_file = matrix_file,
+    positions_file = positions_file,
+    target_gene_requested = target_gene,
+    target_gene_in_matrix = target_gene_name_in_matrix,
+    n_tissue_spots = nrow(plot_data),
+    total_UMI_all_tissue_spots = sum(plot_data$total_UMI),
+    median_total_UMI_per_tissue_spot = median(plot_data$total_UMI),
+    n_target_positive_spots = sum(plot_data$target_raw_count > 0),
+    percent_target_positive_spots = 100 * mean(plot_data$target_raw_count > 0),
+    total_target_raw_count = sum(plot_data$target_raw_count),
+    mean_target_logNormalized_all_spots =
+      mean(plot_data$logNormalized_expression),
+    sd_target_logNormalized_all_spots =
+      sd(plot_data$logNormalized_expression),
+    median_target_logNormalized_all_spots =
+      median(plot_data$logNormalized_expression),
+    max_target_logNormalized_all_spots =
+      max(plot_data$logNormalized_expression)
+  )
+
+  rm(
+    counts,
+    coordinates,
+    total_umi_per_spot,
+    target_raw_counts,
+    log_normalized_expression,
+    plot_data
+  )
+
+  invisible(gc(verbose = FALSE))
+}
+
+
+# ==============================================================================
+# 7. Combine processed data and define global colour scale
+# ==============================================================================
+
+all_plot_data <- bind_rows(sample_plot_data)
+
+summary_table <- bind_rows(sample_summary) |>
+  mutate(
+    sample_ID = factor(sample_ID, levels = selected_samples)
+  ) |>
+  arrange(sample_ID) |>
+  mutate(
+    sample_ID = as.character(sample_ID)
+  )
+
+write.table(
+  summary_table,
+  file = output_summary_tsv,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = TRUE
+)
+
+all_expression_values <- all_plot_data$logNormalized_expression
+positive_expression_values <- all_expression_values[
+  is.finite(all_expression_values) &
+    all_expression_values > 0
+]
+
+common_colour_min <- 0
+
+if (length(positive_expression_values) == 0) {
+  warning("No positive ", target_gene, " expression values found. Using range 0-1.")
+  common_colour_max <- 1
+} else {
+  common_colour_max <- as.numeric(
+    quantile(
+      positive_expression_values,
+      probs = upper_colour_quantile,
+      na.rm = TRUE,
+      names = FALSE,
+      type = 7
+    )
+  )
+
+  if (!is.finite(common_colour_max) || common_colour_max <= 0) {
+    common_colour_max <- max(positive_expression_values, na.rm = TRUE)
+  }
+}
+
+message("")
+message("Common colour scale:")
+message("Minimum: ", round(common_colour_min, 4))
+message(
+  "Maximum: ",
+  round(common_colour_max, 4),
+  " (",
+  upper_colour_quantile * 100,
+  "th percentile of positive values)"
+)
+
+
+# ==============================================================================
+# 8. Define no-image geometry strategy
+# ==============================================================================
+
+if (!show_histology_image) {
+  message("")
+  message(
+    "No-image mode uses scaled Space Ranger pixel coordinates, not array_row/array_col."
+  )
+  message(
+    "This preserves x/y geometry and helps keep spots visually circular."
+  )
+  message(
+    "Optional 90-degree rotation in no-image mode: ", rotate_no_image_90
+  )
+}
+
+
+# ==============================================================================
+# 9. Plot functions
+# ==============================================================================
+
+prepare_no_image_geometry <- function(sample_id) {
+
+  plot_data <- sample_plot_data[[sample_id]]
+  image_info <- image_info_list[[sample_id]]
+
+  if (is.null(image_info)) {
+    stop("Missing image information for sample: ", sample_id)
+  }
+
+  plot_data <- plot_data |>
+    mutate(
+      x_plot = pxl_col_in_fullres * image_info$scale_factor,
+      y_plot = pxl_row_in_fullres * image_info$scale_factor
+    )
+
+  if (rotate_no_image_90) {
+
+    plot_data <- plot_data |>
+      mutate(
+        x_use = y_plot,
+        y_use = image_info$image_width - x_plot
+      )
+
+    frame_limits <- compute_square_limits(
+      xmin = 0,
+      xmax = image_info$image_height,
+      ymin = 0,
+      ymax = image_info$image_width,
+      padding_fraction = panel_padding_fraction_no_image
+    )
+
+  } else {
+
+    plot_data <- plot_data |>
+      mutate(
+        x_use = x_plot,
+        y_use = y_plot
+      )
+
+    frame_limits <- compute_square_limits(
+      xmin = 0,
+      xmax = image_info$image_width,
+      ymin = 0,
+      ymax = image_info$image_height,
+      padding_fraction = panel_padding_fraction_no_image
+    )
+  }
+
+  list(
+    plot_data = plot_data,
+    frame_limits = frame_limits
+  )
+}
+
+
+create_no_image_plot <- function(sample_id) {
+
+  geometry <- prepare_no_image_geometry(sample_id)
+  plot_data <- geometry$plot_data
+  frame_limits <- geometry$frame_limits
+
+  title_text <- make_plot_title_line(plot_data)
+  subtitle_text <- make_plot_subtitle_line(plot_data)
+
+  ggplot(
+    plot_data,
+    aes(
+      x = x_use,
+      y = y_use,
+      colour = logNormalized_expression
+    )
+  ) +
+    geom_point(
+      size = point_size_no_image,
+      shape = 16,
+      stroke = 0
+    ) +
+    scale_x_continuous(
+      limits = frame_limits$x_limits,
+      expand = c(0, 0)
+    ) +
+    scale_y_reverse(
+      limits = rev(frame_limits$y_limits),
+      expand = c(0, 0)
+    ) +
+    coord_fixed() +
+    scale_colour_gradientn(
+      colours = palette_colors,
+      limits = c(common_colour_min, common_colour_max),
+      oob = scales::squish,
+      na.value = "#D9D9D9"
+    ) +
+    labs(
+      title = title_text,
+      subtitle = subtitle_text,
+      colour = paste0(
+        target_gene,
+        "\nlog1p(count/UMI × 10,000)"
+      )
+    ) +
+    theme_void(base_family = "DejaVu Sans") +
+    theme(
+      plot.background = element_rect(fill = "white", colour = NA),
+      panel.background = element_rect(fill = "white", colour = NA),
+      panel.border = element_rect(
+        colour = "black",
+        fill = NA,
+        linewidth = panel_border_linewidth
+      ),
+      plot.title = element_text(
+        size = 12.5,
+        face = "bold",
+        hjust = 0.5,
+        margin = margin(b = 4)
+      ),
+      plot.subtitle = element_text(
+        size = 7.5,
+        hjust = 0.5,
+        lineheight = 1.08,
+        margin = margin(b = 6)
+      ),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.title = element_text(size = 9, face = "bold"),
+      legend.text = element_text(size = 8),
+      plot.margin = margin(t = 8, r = 8, b = 8, l = 8)
+    ) +
+    guides(
+      colour = guide_colourbar(
+        title.position = "top",
+        direction = "horizontal",
+        barwidth = grid::unit(42, "mm"),
+        barheight = grid::unit(4.5, "mm")
+      )
+    )
+}
+
+
+create_with_image_plot <- function(sample_id) {
+
+  plot_data <- sample_plot_data[[sample_id]]
+  image_info <- image_info_list[[sample_id]]
+
+  if (is.null(image_info)) {
+    stop("Missing image information for sample: ", sample_id)
+  }
+
+  image_array <- png::readPNG(image_info$image_file)
+  image_height <- dim(image_array)[1]
+  image_width <- dim(image_array)[2]
+  scale_factor <- image_info$scale_factor
+
+  plot_data <- plot_data |>
+    mutate(
+      x_plot = pxl_col_in_fullres * scale_factor,
+      y_plot = pxl_row_in_fullres * scale_factor
+    )
+
+  image_limits <- compute_square_limits(
+    xmin = 0,
+    xmax = image_width,
+    ymin = 0,
+    ymax = image_height,
+    padding_fraction = panel_padding_fraction_with_image
+  )
+
+  title_text <- make_plot_title_line(plot_data)
+  subtitle_text <- make_plot_subtitle_line(plot_data)
+
+  ggplot() +
+    annotation_raster(
+      raster = image_array,
+      xmin = 0,
+      xmax = image_width,
+      ymin = image_height,
+      ymax = 0
+    ) +
+    geom_point(
+      data = plot_data,
+      aes(
+        x = x_plot,
+        y = y_plot,
+        colour = logNormalized_expression
+      ),
+      size = point_size_with_image,
+      shape = 16,
+      stroke = 0
+    ) +
+    scale_x_continuous(
+      limits = image_limits$x_limits,
+      expand = c(0, 0)
+    ) +
+    scale_y_reverse(
+      limits = rev(image_limits$y_limits),
+      expand = c(0, 0)
+    ) +
+    coord_fixed() +
+    scale_colour_gradientn(
+      colours = palette_colors,
+      limits = c(common_colour_min, common_colour_max),
+      oob = scales::squish,
+      na.value = "#D9D9D9"
+    ) +
+    labs(
+      title = title_text,
+      subtitle = subtitle_text,
+      colour = paste0(
+        target_gene,
+        "\nlog1p(count/UMI × 10,000)"
+      )
+    ) +
+    theme_void(base_family = "DejaVu Sans") +
+    theme(
+      plot.background = element_rect(fill = "white", colour = NA),
+      panel.background = element_rect(fill = "white", colour = NA),
+      panel.border = element_rect(
+        colour = "black",
+        fill = NA,
+        linewidth = panel_border_linewidth
+      ),
+      plot.title = element_text(
+        size = 12.5,
+        face = "bold",
+        hjust = 0.5,
+        margin = margin(b = 4)
+      ),
+      plot.subtitle = element_text(
+        size = 7.5,
+        hjust = 0.5,
+        lineheight = 1.08,
+        margin = margin(b = 6)
+      ),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.title = element_text(size = 9, face = "bold"),
+      legend.text = element_text(size = 8),
+      plot.margin = margin(t = 8, r = 8, b = 8, l = 8)
+    ) +
+    guides(
+      colour = guide_colourbar(
+        title.position = "top",
+        direction = "horizontal",
+        barwidth = grid::unit(42, "mm"),
+        barheight = grid::unit(4.5, "mm")
+      )
+    )
+}
+
+
+create_gene_plot <- function(sample_id) {
+  if (show_histology_image) {
+    create_with_image_plot(sample_id)
+  } else {
+    create_no_image_plot(sample_id)
+  }
+}
+
+
+# ==============================================================================
+# 10. Build plots and save individual PNG files
+# ==============================================================================
+
+gene_plots <- lapply(selected_samples, create_gene_plot)
+names(gene_plots) <- selected_samples
+
+for (sample_id in selected_samples) {
+
+  individual_png_file <- file.path(
+    individual_png_dir,
+    paste0(
+      target_gene,
+      "_",
+      sample_id,
+      "_",
+      mode_label,
+      ".png"
+    )
+  )
+
+  ggsave(
+    filename = individual_png_file,
+    plot = gene_plots[[sample_id]],
+    width = individual_png_width_inches,
+    height = individual_png_height_inches,
+    units = "in",
+    dpi = individual_png_dpi,
+    bg = "white"
+  )
+
+  if (!file.exists(individual_png_file)) {
+    stop("Individual PNG was not created for sample ", sample_id)
+  }
+}
+
+
+# ==============================================================================
+# 11. Arrange plots into 4 requested columns
+# ==============================================================================
+
+column_order <- c(
+  "male_neurotypical",
+  "male_asd",
+  "female_neurotypical",
+  "female_asd"
+)
+
+column_titles <- c(
+  male_neurotypical = "Male neurotypical",
+  male_asd = "Male ASD",
+  female_neurotypical = "Female neurotypical",
+  female_asd = "Female ASD"
+)
+
+samples_by_column <- lapply(
+  column_order,
+  function(column_key) {
+    sample_table |>
+      filter(column_key == !!column_key) |>
+      pull(sample_ID)
+  }
+)
+
+names(samples_by_column) <- column_order
+
+max_rows <- max(lengths(samples_by_column))
+
+message("")
+message("Samples by output column:")
+for (column_key in column_order) {
+  message(
+    column_key,
+    ": ",
+    paste(samples_by_column[[column_key]], collapse = ", ")
+  )
+}
+
+# Pad each column to max_rows with plot_spacer()
+plots_by_column_padded <- lapply(
+  column_order,
+  function(column_key) {
+
+    sample_ids <- samples_by_column[[column_key]]
+    plot_list <- lapply(sample_ids, function(sid) gene_plots[[sid]])
+
+    if (length(plot_list) < max_rows) {
+      plot_list <- c(
+        plot_list,
+        rep(list(patchwork::plot_spacer()), max_rows - length(plot_list))
+      )
+    }
+
+    plot_list
+  }
+)
+
+names(plots_by_column_padded) <- column_order
+
+# Interleave row-wise so wrap_plots(..., ncol = 4) yields fixed columns
+interleaved_plots <- list()
+
+for (row_i in seq_len(max_rows)) {
+  for (column_key in column_order) {
+    interleaved_plots[[length(interleaved_plots) + 1]] <-
+      plots_by_column_padded[[column_key]][[row_i]]
+  }
+}
+
+# A compact annotation describing the column layout
+layout_description <- paste(
+  "Columns:",
+  "1 = Male neurotypical",
+  "2 = Male ASD",
+  "3 = Female neurotypical",
+  "4 = Female ASD",
+  sep = " | "
+)
+
+subtitle_mode <- if (show_histology_image) {
+  "Histology image shown"
+} else {
+  "No histology image; true Space Ranger pixel-coordinate frame preserved across samples"
+}
+
+combined_plot <- wrap_plots(
+  interleaved_plots,
+  ncol = number_of_columns,
+  guides = "collect"
+) +
+  plot_annotation(
+    title = paste0(
+      target_gene,
+      " spatial expression in 16 maternal FMT Visium samples"
+    ),
+    subtitle = paste0(
+      subtitle_mode,
+      " | ",
+      layout_description,
+      " | common colour range: 0–",
+      round(common_colour_max, 3),
+      " | upper limit = ",
+      upper_colour_quantile * 100,
+      "th percentile of positive values"
+    ),
+    theme = theme(
+      text = element_text(family = "DejaVu Sans"),
+      plot.title = element_text(
+        size = 20,
+        face = "bold",
+        hjust = 0.5
+      ),
+      plot.subtitle = element_text(
+        size = 10,
+        hjust = 0.5,
+        lineheight = 1.04
+      ),
+      plot.margin = margin(t = 8, r = 8, b = 8, l = 8)
+    )
+  ) &
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.justification = "center"
+  )
+
+
+# ==============================================================================
+# 12. Save combined PDF
+# ==============================================================================
+
+if (capabilities("cairo")) {
+  pdf_device <- grDevices::cairo_pdf
+} else {
+  pdf_device <- grDevices::pdf
+  warning("Cairo is unavailable; using standard pdf device.")
+}
+
+ggsave(
+  filename = output_pdf,
+  plot = combined_plot,
+  device = pdf_device,
+  width = combined_pdf_width_inches,
+  height = combined_pdf_height_inches,
+  units = "in",
+  limitsize = FALSE,
+  bg = "white"
+)
+
+if (!file.exists(output_pdf)) {
+  stop("Combined PDF was not created: ", output_pdf)
+}
+
+
+# ==============================================================================
+# 13. Final report
+# ==============================================================================
+
+output_pdf_size_mb <- file.info(output_pdf)$size / 1024^2
+
+message("")
+message("============================================================")
+message("Analysis completed successfully.")
+message("============================================================")
+message("Target gene: ", target_gene)
+message("Show histology image: ", show_histology_image)
+message("Rotate no-image mode by 90 degrees: ", rotate_no_image_90)
+message("Combined PDF: ", normalizePath(output_pdf, mustWork = TRUE))
+message("Combined PDF size: ", round(output_pdf_size_mb, 2), " MB")
+message("Individual PNG directory: ", normalizePath(individual_png_dir, mustWork = TRUE))
+message("Summary TSV: ", normalizePath(output_summary_tsv, mustWork = TRUE))
+message("============================================================")
