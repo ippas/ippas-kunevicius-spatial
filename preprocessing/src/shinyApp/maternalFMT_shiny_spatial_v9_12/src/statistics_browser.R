@@ -1,0 +1,1409 @@
+# ==============================================================================
+# Differential-expression statistics browser
+# ============================================================================== 
+
+statistics_browser_test_catalog <- function() {
+  list(
+    overall_group = list(
+      label = "Donor group main effect",
+      aliases = c(
+        "Overall_Group_ASD_vs_Neurotypical"
+      )
+    ),
+    overall_sex = list(
+      label = "Sex main effect",
+      aliases = c(
+        "Overall_Sex_Female_vs_Male"
+      )
+    ),
+    interaction = list(
+      label = "Group × Sex interaction",
+      aliases = c(
+        "Interaction"
+      )
+    ),
+    group_male = list(
+      label = "ASD vs Neurotypical — Male",
+      aliases = c(
+        "ASD_vs_Neurotypical_in_Male",
+        "ASD_Male_vs_Neurotypical_Male"
+      )
+    ),
+    group_female = list(
+      label = "ASD vs Neurotypical — Female",
+      aliases = c(
+        "ASD_vs_Neurotypical_in_Female",
+        "ASD_Female_vs_Neurotypical_Female"
+      )
+    ),
+    sex_neurotypical = list(
+      label = "Female vs Male — Neurotypical",
+      aliases = c(
+        "Neurotypical_Female_vs_Neurotypical_Male",
+        "Female_vs_Male_in_Neurotypical"
+      )
+    ),
+    sex_asd = list(
+      label = "Female vs Male — ASD",
+      aliases = c(
+        "ASD_Female_vs_ASD_Male",
+        "Female_vs_Male_in_ASD"
+      )
+    )
+  )
+}
+
+resolve_statistics_browser_tests <- function(
+  edger_results,
+  test_definitions
+) {
+  catalog <- statistics_browser_test_catalog()
+  available_ids <- names(edger_results)
+
+  resolved <- lapply(
+    names(catalog),
+    function(key) {
+      entry <- catalog[[key]]
+      matching_ids <- entry$aliases[
+        entry$aliases %in% available_ids
+      ]
+
+      if (length(matching_ids) == 0L) {
+        stop(
+          "Could not identify edgeR result table for statistics tab '",
+          entry$label,
+          "'. Expected one of: ",
+          paste(entry$aliases, collapse = ", "),
+          ". Available tables: ",
+          paste(available_ids, collapse = ", "),
+          call. = FALSE
+        )
+      }
+
+      test_id <- matching_ids[[1]]
+
+      comparison <- test_id
+      if (
+        is.data.frame(test_definitions) &&
+          all(c("test_id", "comparison") %in% colnames(test_definitions))
+      ) {
+        definition_rows <- test_definitions[
+          as.character(test_definitions$test_id) == test_id,
+          ,
+          drop = FALSE
+        ]
+        if (nrow(definition_rows) == 1L) {
+          comparison_value <- as.character(
+            definition_rows$comparison[[1]]
+          )
+          if (!is.na(comparison_value) && nzchar(comparison_value)) {
+            comparison <- comparison_value
+          }
+        }
+      }
+
+      list(
+        key = key,
+        label = entry$label,
+        test_id = test_id,
+        comparison = comparison
+      )
+    }
+  )
+
+  names(resolved) <- names(catalog)
+  resolved
+}
+
+pretty_statistics_group_label <- function(x) {
+  x <- gsub("_", " ", as.character(x), fixed = TRUE)
+  x <- gsub("\\s+", " ", x)
+  trimws(x)
+}
+
+format_statistics_numeric <- function(
+  values,
+  digits = 1L
+) {
+  values <- as.numeric(values)
+  output <- rep(NA_real_, length(values))
+  finite_values <- is.finite(values)
+  output[finite_values] <- round(values[finite_values], digits = digits)
+  output
+}
+
+format_group_summary_cell <- function(
+  table,
+  value_columns,
+  prefix_to_remove,
+  digits
+) {
+  if (length(value_columns) == 0L) {
+    return(rep("", nrow(table)))
+  }
+
+  group_labels <- vapply(
+    value_columns,
+    function(column_name) {
+      pretty_statistics_group_label(
+        sub(
+          paste0("^", prefix_to_remove),
+          "",
+          column_name
+        )
+      )
+    },
+    character(1)
+  )
+
+  if (nrow(table) == 0L) {
+    return(character(0))
+  }
+
+  formatted_values <- lapply(
+    value_columns,
+    function(column_name) {
+      values <- suppressWarnings(
+        as.numeric(table[[column_name]])
+      )
+
+      ifelse(
+        is.finite(values),
+        formatC(
+          values,
+          format = "f",
+          digits = digits
+        ),
+        "NA"
+      )
+    }
+  )
+
+  vapply(
+    seq_len(nrow(table)),
+    function(row_index) {
+      paste(
+        paste0(
+          group_labels,
+          ": ",
+          vapply(
+            formatted_values,
+            function(values) values[[row_index]],
+            character(1)
+          )
+        ),
+        collapse = "; "
+      )
+    },
+    character(1)
+  )
+}
+
+
+statistics_row_max <- function(
+  table,
+  value_columns
+) {
+  if (nrow(table) == 0L) {
+    return(numeric(0))
+  }
+
+  if (length(value_columns) == 0L) {
+    return(rep(NA_real_, nrow(table)))
+  }
+
+  value_matrix <- vapply(
+    value_columns,
+    function(column_name) {
+      suppressWarnings(
+        as.numeric(table[[column_name]])
+      )
+    },
+    numeric(nrow(table))
+  )
+
+  if (is.null(dim(value_matrix))) {
+    value_matrix <- matrix(
+      value_matrix,
+      ncol = 1L
+    )
+  }
+
+  apply(
+    value_matrix,
+    1L,
+    function(values) {
+      finite_values <- values[is.finite(values)]
+      if (length(finite_values) == 0L) {
+        return(NA_real_)
+      }
+      max(finite_values)
+    }
+  )
+}
+
+statistics_unique_gene_count <- function(table) {
+  if (nrow(table) == 0L) {
+    return(0L)
+  }
+
+  gene_values <- if ("gene" %in% colnames(table)) {
+    as.character(table$gene)
+  } else {
+    rep(NA_character_, nrow(table))
+  }
+
+  ensembl_values <- if ("ensembl_gene_id" %in% colnames(table)) {
+    as.character(table$ensembl_gene_id)
+  } else {
+    rep(NA_character_, nrow(table))
+  }
+
+  identifiers <- ifelse(
+    !is.na(gene_values) & nzchar(gene_values),
+    gene_values,
+    ensembl_values
+  )
+
+  identifiers <- identifiers[
+    !is.na(identifiers) &
+      nzchar(identifiers)
+  ]
+
+  length(unique(identifiers))
+}
+
+statistics_unique_gene_identifiers <- function(table) {
+  if (nrow(table) == 0L) {
+    return(character(0))
+  }
+
+  gene_values <- if ("gene" %in% colnames(table)) {
+    trimws(as.character(table$gene))
+  } else {
+    rep(NA_character_, nrow(table))
+  }
+
+  ensembl_values <- if ("ensembl_gene_id" %in% colnames(table)) {
+    trimws(as.character(table$ensembl_gene_id))
+  } else {
+    rep(NA_character_, nrow(table))
+  }
+
+  identifiers <- ifelse(
+    !is.na(gene_values) & nzchar(gene_values),
+    gene_values,
+    ensembl_values
+  )
+
+  identifiers <- identifiers[
+    !is.na(identifiers) &
+      nzchar(identifiers)
+  ]
+
+  unique(identifiers)
+}
+
+
+statistics_dt_filter_is_active <- function(input, table_input_id) {
+  global_search <- input[[paste0(table_input_id, "_search")]]
+  column_searches <- input[[paste0(table_input_id, "_search_columns")]]
+
+  global_active <- !is.null(global_search) &&
+    length(global_search) > 0L &&
+    any(nzchar(trimws(as.character(global_search))))
+
+  column_active <- !is.null(column_searches) &&
+    length(column_searches) > 0L &&
+    any(nzchar(trimws(as.character(column_searches))))
+
+  isTRUE(global_active || column_active)
+}
+
+statistics_dt_visible_table <- function(
+  filtered_table,
+  input,
+  table_input_id
+) {
+  rows_all_input <- paste0(table_input_id, "_rows_all")
+  visible_row_indices <- input[[rows_all_input]]
+
+  if (!is.null(visible_row_indices)) {
+    visible_row_indices <- suppressWarnings(
+      as.integer(visible_row_indices)
+    )
+    visible_row_indices <- visible_row_indices[
+      is.finite(visible_row_indices) &
+        visible_row_indices >= 1L &
+        visible_row_indices <= nrow(filtered_table)
+    ]
+
+    return(
+      filtered_table[
+        visible_row_indices,
+        ,
+        drop = FALSE
+      ]
+    )
+  }
+
+  # DT can report NULL for *_rows_all when an active global/column filter
+  # leaves zero matching rows. In that case the visible table is genuinely empty
+  # and must not fall back to the sidebar-filtered table.
+  if (statistics_dt_filter_is_active(input, table_input_id)) {
+    return(filtered_table[0, , drop = FALSE])
+  }
+
+  filtered_table
+}
+
+add_statistics_summary_columns <- function(
+  table,
+  show_percent_positive = FALSE,
+  show_log2_qn_mean = FALSE
+) {
+  output <- table
+
+  if (isTRUE(show_percent_positive)) {
+    mean_columns <- grep(
+      "^mean_percent_positive_spots_",
+      colnames(table),
+      value = TRUE
+    )
+    sd_columns <- grep(
+      "^sd_percent_positive_spots_",
+      colnames(table),
+      value = TRUE
+    )
+
+    mean_suffixes <- sub(
+      "^mean_percent_positive_spots_",
+      "",
+      mean_columns
+    )
+    sd_suffixes <- sub(
+      "^sd_percent_positive_spots_",
+      "",
+      sd_columns
+    )
+    shared_suffixes <- mean_suffixes[
+      mean_suffixes %in% sd_suffixes
+    ]
+
+    mean_columns <- paste0(
+      "mean_percent_positive_spots_",
+      shared_suffixes
+    )
+    sd_columns <- paste0(
+      "sd_percent_positive_spots_",
+      shared_suffixes
+    )
+
+    output[["Positive spots mean (%)"]] <-
+      format_group_summary_cell(
+        table = table,
+        value_columns = mean_columns,
+        prefix_to_remove = "mean_percent_positive_spots_",
+        digits = 1L
+      )
+
+    output[["Positive spots SD (%)"]] <-
+      format_group_summary_cell(
+        table = table,
+        value_columns = sd_columns,
+        prefix_to_remove = "sd_percent_positive_spots_",
+        digits = 1L
+      )
+  }
+
+  if (isTRUE(show_log2_qn_mean)) {
+    qn_mean_columns <- grep(
+      "^mean_log2plus1_QN_",
+      colnames(table),
+      value = TRUE
+    )
+
+    if (length(qn_mean_columns) == 0L) {
+      stop(
+        "No mean log2(count + 1) + QN columns are available. Re-run the updated pseudobulk pipeline that adds log2+QN descriptive metrics.",
+        call. = FALSE
+      )
+    }
+
+    output[["Mean log2+1 QN"]] <-
+      format_group_summary_cell(
+        table = table,
+        value_columns = qn_mean_columns,
+        prefix_to_remove = "mean_log2plus1_QN_",
+        digits = 3L
+      )
+  }
+
+  output
+}
+
+prepare_statistics_browser_table <- function(
+  result_table,
+  selected_clusters,
+  abs_log2fc_threshold,
+  significance_metric,
+  significance_threshold,
+  min_positive_percent,
+  max_positive_percent,
+  min_log2_qn_mean,
+  selected_columns,
+  show_percent_positive,
+  show_log2_qn_mean
+) {
+  table <- as.data.frame(
+    result_table,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  required_columns <- c(
+    "cluster_id",
+    "logFC",
+    "PValue",
+    "FDR"
+  )
+
+  missing_columns <- setdiff(
+    required_columns,
+    colnames(table)
+  )
+
+  if (length(missing_columns) > 0L) {
+    stop(
+      "Statistics table is missing required column(s): ",
+      paste(missing_columns, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  n_total <- nrow(table)
+  n_unique_total <- statistics_unique_gene_count(table)
+
+  selected_clusters <- as.character(selected_clusters)
+
+  table <- table[
+    as.character(table$cluster_id) %in% selected_clusters,
+    ,
+    drop = FALSE
+  ]
+
+  if (is.finite(abs_log2fc_threshold) && abs_log2fc_threshold > 0) {
+    keep_logfc <- is.finite(table$logFC) &
+      abs(table$logFC) >= abs_log2fc_threshold
+    table <- table[keep_logfc, , drop = FALSE]
+  }
+
+  significance_metric <- match.arg(
+    significance_metric,
+    c("FDR", "PValue")
+  )
+
+  significance_values <- as.numeric(
+    table[[significance_metric]]
+  )
+  keep_significance <- is.finite(significance_values) &
+    significance_values <= significance_threshold
+  table <- table[keep_significance, , drop = FALSE]
+
+  min_positive_percent <- suppressWarnings(
+    as.numeric(min_positive_percent)
+  )
+
+  if (
+    is.finite(min_positive_percent) &&
+      min_positive_percent > 0
+  ) {
+    percent_mean_columns <- grep(
+      "^mean_percent_positive_spots_",
+      colnames(table),
+      value = TRUE
+    )
+
+    if (length(percent_mean_columns) == 0L) {
+      stop(
+        "No mean percent-positive columns are available for this comparison.",
+        call. = FALSE
+      )
+    }
+
+    max_percent <- statistics_row_max(
+      table = table,
+      value_columns = percent_mean_columns
+    )
+
+    table <- table[
+      is.finite(max_percent) &
+        max_percent >= min_positive_percent,
+      ,
+      drop = FALSE
+    ]
+  }
+
+  max_positive_percent <- suppressWarnings(
+    as.numeric(max_positive_percent)
+  )
+
+  if (
+    is.finite(max_positive_percent) &&
+      max_positive_percent < 100
+  ) {
+    percent_mean_columns <- grep(
+      "^mean_percent_positive_spots_",
+      colnames(table),
+      value = TRUE
+    )
+
+    if (length(percent_mean_columns) == 0L) {
+      stop(
+        "No mean percent-positive columns are available for this comparison.",
+        call. = FALSE
+      )
+    }
+
+    max_percent <- statistics_row_max(
+      table = table,
+      value_columns = percent_mean_columns
+    )
+
+    table <- table[
+      is.finite(max_percent) &
+        max_percent <= max_positive_percent,
+      ,
+      drop = FALSE
+    ]
+  }
+
+  min_log2_qn_mean <- suppressWarnings(
+    as.numeric(min_log2_qn_mean)
+  )
+
+  if (
+    is.finite(min_log2_qn_mean) &&
+      min_log2_qn_mean > 0
+  ) {
+    qn_mean_columns <- grep(
+      "^mean_log2plus1_QN_",
+      colnames(table),
+      value = TRUE
+    )
+
+    if (length(qn_mean_columns) == 0L) {
+      stop(
+        "No mean log2(count + 1) + QN columns are available. Re-run the updated pseudobulk pipeline that adds log2+QN descriptive metrics.",
+        call. = FALSE
+      )
+    }
+
+    max_qn_mean <- statistics_row_max(
+      table = table,
+      value_columns = qn_mean_columns
+    )
+
+    table <- table[
+      is.finite(max_qn_mean) &
+        max_qn_mean >= min_log2_qn_mean,
+      ,
+      drop = FALSE
+    ]
+  }
+
+  n_filtered <- nrow(table)
+  n_unique_filtered <- statistics_unique_gene_count(table)
+
+  table <- add_statistics_summary_columns(
+    table = table,
+    show_percent_positive = show_percent_positive,
+    show_log2_qn_mean = show_log2_qn_mean
+  )
+
+  base_column_map <- c(
+    cluster_id = "Cluster",
+    ensembl_gene_id = "Ensembl gene ID",
+    gene = "Gene",
+    chromosome = "Chromosome",
+    logFC = "log2FC",
+    logCPM = "logCPM",
+    F = "F",
+    PValue = "PValue",
+    FDR = "FDR",
+    regulation = "Regulation"
+  )
+
+  selected_base_columns <- selected_columns[
+    selected_columns %in% colnames(table)
+  ]
+
+  summary_columns <- intersect(
+    c(
+      "Positive spots mean (%)",
+      "Positive spots SD (%)",
+      "Mean log2+1 QN"
+    ),
+    colnames(table)
+  )
+
+  display_columns <- c(
+    selected_base_columns,
+    summary_columns
+  )
+
+  display_columns <- unique(
+    display_columns[
+      display_columns %in% colnames(table)
+    ]
+  )
+
+  if (length(display_columns) == 0L) {
+    stop(
+      "No display columns were selected.",
+      call. = FALSE
+    )
+  }
+
+  display <- table[
+    ,
+    display_columns,
+    drop = FALSE
+  ]
+
+  if ("cluster_id" %in% colnames(display) && nrow(display) > 0L) {
+    display$cluster_id <- paste0(
+      "C",
+      as.character(display$cluster_id)
+    )
+  }
+
+  rename_columns <- intersect(
+    names(base_column_map),
+    colnames(display)
+  )
+
+  for (column_name in rename_columns) {
+    colnames(display)[
+      colnames(display) == column_name
+    ] <- base_column_map[[column_name]]
+  }
+
+  list(
+    display = display,
+    filtered_table = table,
+    n_filtered = n_filtered,
+    n_total = n_total,
+    n_unique_filtered = n_unique_filtered,
+    n_unique_total = n_unique_total
+  )
+}
+
+statistics_browser_ui <- function(id) {
+  ns <- shiny::NS(id)
+
+  test_catalog <- statistics_browser_test_catalog()
+
+  table_tabs <- lapply(
+    names(test_catalog),
+    function(key) {
+      shiny::tabPanel(
+        title = test_catalog[[key]]$label,
+        value = key,
+        shiny::div(
+          class = "statistics-comparison-note",
+          shiny::textOutput(
+            outputId = ns(paste0("comparison_note_", key)),
+            inline = TRUE
+          )
+        ),
+        shiny::div(
+          class = "statistics-result-count",
+          shiny::textOutput(
+            outputId = ns(paste0("result_count_", key)),
+            inline = TRUE
+          )
+        ),
+        DT::DTOutput(
+          outputId = ns(paste0("table_", key))
+        )
+      )
+    }
+  )
+
+  shiny::fluidRow(
+    shiny::column(
+      width = 3,
+      shiny::div(
+        class = "statistics-browser-sidebar",
+
+        shiny::h4("Filters"),
+
+        shiny::numericInput(
+          inputId = ns("abs_log2fc"),
+          label = "Minimum |log2FC|",
+          value = 0.5,
+          min = 0,
+          step = 0.1
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Minimum absolute effect size."
+        ),
+
+        shiny::fluidRow(
+          shiny::column(
+            width = 6,
+            shiny::selectInput(
+              inputId = ns("significance_metric"),
+              label = "Significance",
+              choices = c(
+                "FDR" = "FDR",
+                "PValue" = "PValue"
+              ),
+              selected = "FDR"
+            )
+          ),
+          shiny::column(
+            width = 6,
+            shiny::numericInput(
+              inputId = ns("significance_threshold"),
+              label = "Threshold",
+              value = 0.05,
+              min = 0,
+              max = 1,
+              step = 0.01
+            )
+          )
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Maximum FDR or nominal P-value."
+        ),
+
+        shiny::numericInput(
+          inputId = ns("min_positive_percent"),
+          label = "Minimum positive spots (%) in ≥1 group",
+          value = 0,
+          min = 0,
+          max = 100,
+          step = 1
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Keeps a result when at least one biological group reaches this mean percent-positive value."
+        ),
+
+        shiny::numericInput(
+          inputId = ns("max_positive_percent"),
+          label = "Maximum positive spots (%)",
+          value = 100,
+          min = 0,
+          max = 100,
+          step = 1
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Auxiliary upper bound for the highest mean percent-positive value across the biological groups. 100 = no upper restriction."
+        ),
+
+        shiny::numericInput(
+          inputId = ns("min_log2_qn_mean"),
+          label = "Minimum mean log2+1 QN in ≥1 group",
+          value = 0,
+          min = 0,
+          step = 0.1
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Keeps a result when at least one biological group reaches this mean log2(count + 1) + QN value."
+        ),
+
+        shiny::hr(),
+
+        shiny::h4("Clusters"),
+        shiny::div(
+          class = "statistics-cluster-checkboxes",
+          shiny::checkboxGroupInput(
+            inputId = ns("clusters"),
+            label = NULL,
+            choices = character(0),
+            selected = character(0)
+          )
+        ),
+        shiny::fluidRow(
+          shiny::column(
+            width = 6,
+            shiny::actionButton(
+              inputId = ns("select_all_clusters"),
+              label = "Select all",
+              width = "100%"
+            )
+          ),
+          shiny::column(
+            width = 6,
+            shiny::actionButton(
+              inputId = ns("clear_clusters"),
+              label = "Clear",
+              width = "100%"
+            )
+          )
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Only selected clusters are shown."
+        ),
+
+        shiny::hr(),
+
+        shiny::h4("Displayed columns"),
+        shiny::div(
+          class = "statistics-column-checkboxes",
+          shiny::checkboxGroupInput(
+            inputId = ns("columns"),
+            label = NULL,
+            choices = c(
+              "Cluster ID" = "cluster_id",
+              "Ensembl gene ID" = "ensembl_gene_id",
+              "Gene" = "gene",
+              "Chromosome" = "chromosome",
+              "log2FC" = "logFC",
+              "logCPM" = "logCPM",
+              "F" = "F",
+              "PValue" = "PValue",
+              "FDR" = "FDR",
+              "Regulation" = "regulation"
+            ),
+            selected = c(
+              "cluster_id",
+              "gene",
+              "logFC",
+              "F",
+              "PValue",
+              "FDR",
+              "regulation"
+            )
+          )
+        ),
+
+        shiny::checkboxInput(
+          inputId = ns("show_percent_positive"),
+          label = "Positive spots (%) — mean and SD",
+          value = FALSE
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Percent-positive mean and SD are added only when selected."
+        ),
+
+        shiny::checkboxInput(
+          inputId = ns("show_log2_qn_mean"),
+          label = "log2(count + 1) + QN — group mean",
+          value = FALSE
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Shows the group-specific mean log2(count + 1) + quantile-normalized values."
+        ),
+
+        shiny::br(),
+
+        shiny::actionButton(
+          inputId = ns("copy_filtered_genes"),
+          label = "Copy filtered genes",
+          icon = shiny::icon("copy"),
+          width = "100%",
+          class = "btn-default"
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Copies unique gene symbols, one per line. Sidebar filters and filters applied directly in the active table are respected."
+        ),
+        shiny::div(
+          class = "statistics-copy-status",
+          shiny::textOutput(
+            outputId = ns("copy_genes_status"),
+            inline = TRUE
+          )
+        ),
+
+        shiny::downloadButton(
+          outputId = ns("download_data"),
+          label = "Download data",
+          width = "100%",
+          class = "btn-default"
+        ),
+        shiny::div(
+          class = "parameter-note",
+          "Downloads the currently selected comparison after sidebar filters."
+        )
+      )
+    ),
+
+    shiny::column(
+      width = 9,
+      shiny::div(
+        class = "statistics-browser-main",
+        do.call(
+          shiny::tabsetPanel,
+          c(
+            list(
+              id = ns("test_tab"),
+              type = "tabs"
+            ),
+            table_tabs
+          )
+        )
+      )
+    )
+  )
+}
+
+statistics_browser_server <- function(
+  id,
+  edger_results,
+  test_definitions,
+  cluster_ids,
+  cluster_names
+) {
+  shiny::moduleServer(
+    id,
+    function(input, output, session) {
+      resolved_tests <- resolve_statistics_browser_tests(
+        edger_results = edger_results,
+        test_definitions = test_definitions
+      )
+
+      cluster_ids <- sort_cluster_ids(cluster_ids)
+
+      cluster_labels <- vapply(
+        cluster_ids,
+        function(cluster_id) {
+          anatomical_name <- cluster_names[[as.character(cluster_id)]]
+          if (
+            is.null(anatomical_name) ||
+              is.na(anatomical_name) ||
+              !nzchar(anatomical_name)
+          ) {
+            paste0("C", cluster_id)
+          } else {
+            paste0(
+              "C",
+              cluster_id,
+              " — ",
+              anatomical_name
+            )
+          }
+        },
+        character(1)
+      )
+
+      cluster_choices <- stats::setNames(
+        cluster_ids,
+        cluster_labels
+      )
+
+      shiny::updateCheckboxGroupInput(
+        session = session,
+        inputId = "clusters",
+        choices = cluster_choices,
+        selected = cluster_ids
+      )
+
+      shiny::observeEvent(
+        input$select_all_clusters,
+        {
+          shiny::updateCheckboxGroupInput(
+            session = session,
+            inputId = "clusters",
+            choices = cluster_choices,
+            selected = cluster_ids
+          )
+        }
+      )
+
+      shiny::observeEvent(
+        input$clear_clusters,
+        {
+          shiny::updateCheckboxGroupInput(
+            session = session,
+            inputId = "clusters",
+            choices = cluster_choices,
+            selected = character(0)
+          )
+        }
+      )
+
+      current_download_table <- shiny::reactive({
+        shiny::req(input$test_tab)
+        shiny::req(input$significance_metric)
+        shiny::req(input$significance_threshold)
+        shiny::req(input$abs_log2fc)
+        shiny::req(input$min_positive_percent)
+        shiny::req(input$max_positive_percent)
+        shiny::req(input$min_log2_qn_mean)
+
+        current_key <- as.character(input$test_tab)
+
+        shiny::validate(
+          shiny::need(
+            current_key %in% names(resolved_tests),
+            "Select a statistics comparison."
+          ),
+          shiny::need(
+            length(input$clusters) > 0L,
+            "Select at least one cluster."
+          ),
+          shiny::need(
+            length(input$columns) > 0L ||
+              isTRUE(input$show_percent_positive) ||
+              isTRUE(input$show_log2_qn_mean),
+            "Select at least one column to display."
+          )
+        )
+
+        current_test <- resolved_tests[[current_key]]
+
+        prepare_statistics_browser_table(
+          result_table = edger_results[[current_test$test_id]],
+          selected_clusters = input$clusters,
+          abs_log2fc_threshold = input$abs_log2fc,
+          significance_metric = input$significance_metric,
+          significance_threshold = input$significance_threshold,
+          min_positive_percent = input$min_positive_percent,
+          max_positive_percent = input$max_positive_percent,
+          min_log2_qn_mean = input$min_log2_qn_mean,
+          selected_columns = input$columns,
+          show_percent_positive = input$show_percent_positive,
+          show_log2_qn_mean = input$show_log2_qn_mean
+        )
+      })
+
+      copy_genes_status <- shiny::reactiveVal("")
+
+      output$copy_genes_status <- shiny::renderText({
+        copy_genes_status()
+      })
+
+      shiny::observeEvent(
+        input$copy_filtered_genes,
+        {
+          shiny::req(input$test_tab)
+
+          current_key <- as.character(input$test_tab)
+          result <- current_download_table()
+          filtered_table <- result$filtered_table
+
+          filtered_table <- statistics_dt_visible_table(
+            filtered_table = filtered_table,
+            input = input,
+            table_input_id = paste0("table_", current_key)
+          )
+
+          genes_to_copy <- statistics_unique_gene_identifiers(
+            filtered_table
+          )
+
+          shiny::validate(
+            shiny::need(
+              length(genes_to_copy) > 0L,
+              "No genes remain after the current filters."
+            )
+          )
+
+          copy_genes_status(
+            paste0(
+              "Copying ",
+              format(length(genes_to_copy), big.mark = ","),
+              " unique genes..."
+            )
+          )
+
+          session$sendCustomMessage(
+            type = "copy-to-clipboard",
+            message = list(
+              text = paste(genes_to_copy, collapse = "\n"),
+              resultInputId = session$ns("copy_clipboard_result"),
+              numberOfGenes = length(genes_to_copy)
+            )
+          )
+        },
+        ignoreInit = TRUE
+      )
+
+      shiny::observeEvent(
+        input$copy_clipboard_result,
+        {
+          result <- input$copy_clipboard_result
+
+          if (isTRUE(result$ok)) {
+            number_of_genes <- suppressWarnings(
+              as.integer(result$numberOfGenes)
+            )
+            if (!is.finite(number_of_genes)) {
+              number_of_genes <- 0L
+            }
+
+            success_message <- paste0(
+              "Copied ",
+              format(number_of_genes, big.mark = ","),
+              " unique genes."
+            )
+            copy_genes_status(success_message)
+            shiny::showNotification(
+              success_message,
+              type = "message",
+              duration = 2
+            )
+          } else {
+            error_message <- "Could not copy genes automatically. Check browser clipboard permissions."
+            copy_genes_status(error_message)
+            shiny::showNotification(
+              error_message,
+              type = "error",
+              duration = 4
+            )
+          }
+        },
+        ignoreInit = TRUE
+      )
+
+      output$download_data <- shiny::downloadHandler(
+        filename = function() {
+          current_key <- as.character(input$test_tab)
+          current_test <- resolved_tests[[current_key]]
+          safe_test_id <- gsub(
+            "[^A-Za-z0-9._-]+",
+            "_",
+            current_test$test_id
+          )
+          paste0(
+            safe_test_id,
+            "_filtered_statistics.tsv"
+          )
+        },
+        content = function(file) {
+          result <- current_download_table()
+          utils::write.table(
+            result$display,
+            file = file,
+            sep = "\t",
+            quote = FALSE,
+            row.names = FALSE,
+            col.names = TRUE,
+            na = "NA"
+          )
+        }
+      )
+
+      for (key in names(resolved_tests)) {
+        local({
+          current_key <- key
+          current_test <- resolved_tests[[current_key]]
+
+          output[[paste0("comparison_note_", current_key)]] <-
+            shiny::renderText({
+              paste0(
+                current_test$comparison,
+                " · test_id: ",
+                current_test$test_id
+              )
+            })
+
+          prepared_table <- shiny::reactive({
+            shiny::req(input$significance_metric)
+            shiny::req(input$significance_threshold)
+            shiny::req(input$abs_log2fc)
+            shiny::req(input$min_positive_percent)
+            shiny::req(input$max_positive_percent)
+            shiny::req(input$min_log2_qn_mean)
+
+            shiny::validate(
+              shiny::need(
+                length(input$clusters) > 0L,
+                "Select at least one cluster."
+              ),
+              shiny::need(
+                length(input$columns) > 0L ||
+                  isTRUE(input$show_percent_positive) ||
+                  isTRUE(input$show_log2_qn_mean),
+                "Select at least one column to display."
+              ),
+              shiny::need(
+                is.finite(input$abs_log2fc) &&
+                  input$abs_log2fc >= 0,
+                "Minimum |log2FC| must be 0 or greater."
+              ),
+              shiny::need(
+                is.finite(input$significance_threshold) &&
+                  input$significance_threshold >= 0 &&
+                  input$significance_threshold <= 1,
+                "Significance threshold must be between 0 and 1."
+              ),
+              shiny::need(
+                is.finite(input$min_positive_percent) &&
+                  input$min_positive_percent >= 0 &&
+                  input$min_positive_percent <= 100,
+                "Minimum positive spots must be between 0 and 100."
+              ),
+              shiny::need(
+                is.finite(input$max_positive_percent) &&
+                  input$max_positive_percent >= 0 &&
+                  input$max_positive_percent <= 100,
+                "Maximum positive spots must be between 0 and 100."
+              ),
+              shiny::need(
+                input$max_positive_percent >= input$min_positive_percent,
+                "Maximum positive spots must be greater than or equal to the minimum positive-spots threshold."
+              ),
+              shiny::need(
+                is.finite(input$min_log2_qn_mean) &&
+                  input$min_log2_qn_mean >= 0,
+                "Minimum mean log2+1 QN must be 0 or greater."
+              )
+            )
+
+            prepare_statistics_browser_table(
+              result_table = edger_results[[current_test$test_id]],
+              selected_clusters = input$clusters,
+              abs_log2fc_threshold = input$abs_log2fc,
+              significance_metric = input$significance_metric,
+              significance_threshold = input$significance_threshold,
+              min_positive_percent = input$min_positive_percent,
+              max_positive_percent = input$max_positive_percent,
+              min_log2_qn_mean = input$min_log2_qn_mean,
+              selected_columns = input$columns,
+              show_percent_positive = input$show_percent_positive,
+              show_log2_qn_mean = input$show_log2_qn_mean
+            )
+          })
+
+          output[[paste0("result_count_", current_key)]] <-
+            shiny::renderText({
+              result <- prepared_table()
+              visible_table <- result$filtered_table
+
+              visible_table <- statistics_dt_visible_table(
+                filtered_table = result$filtered_table,
+                input = input,
+                table_input_id = paste0("table_", current_key)
+              )
+
+              n_visible <- nrow(visible_table)
+              n_unique_visible <- statistics_unique_gene_count(visible_table)
+
+              per_cluster_counts <- vapply(
+                cluster_ids,
+                function(cluster_id_current) {
+                  cluster_table <- visible_table[
+                    as.character(visible_table$cluster_id) ==
+                      as.character(cluster_id_current),
+                    ,
+                    drop = FALSE
+                  ]
+                  statistics_unique_gene_count(cluster_table)
+                },
+                integer(1)
+              )
+
+              per_cluster_text <- paste(
+                paste0(
+                  "C",
+                  cluster_ids,
+                  ": ",
+                  format(per_cluster_counts, big.mark = ",")
+                ),
+                collapse = " · "
+              )
+
+              paste0(
+                "Filtered results: ",
+                format(n_visible, big.mark = ","),
+                " / ",
+                format(result$n_total, big.mark = ","),
+                "\nUnique genes: ",
+                format(n_unique_visible, big.mark = ","),
+                " / ",
+                format(result$n_unique_total, big.mark = ","),
+                "\nResults per cluster: ",
+                per_cluster_text
+              )
+            })
+
+          output[[paste0("table_", current_key)]] <- DT::renderDT(
+            {
+              result <- prepared_table()
+              display <- result$display
+
+              shiny::validate(
+                shiny::need(
+                  nrow(display) > 0L,
+                  "No results meet the current filters."
+                )
+              )
+
+              dt <- DT::datatable(
+                display,
+                rownames = FALSE,
+                filter = "top",
+                class = "stripe hover compact",
+                options = list(
+                  pageLength = 25,
+                  lengthMenu = c(10, 25, 50, 100),
+                  lengthChange = TRUE,
+                  scrollX = TRUE,
+                  autoWidth = TRUE,
+                  deferRender = TRUE,
+                  order = list(),
+                  dom = "lftip"
+                )
+              )
+
+              if ("log2FC" %in% colnames(display)) {
+                dt <- DT::formatRound(
+                  dt,
+                  columns = "log2FC",
+                  digits = 3
+                )
+              }
+
+              if ("logCPM" %in% colnames(display)) {
+                dt <- DT::formatRound(
+                  dt,
+                  columns = "logCPM",
+                  digits = 3
+                )
+              }
+
+              if ("F" %in% colnames(display)) {
+                dt <- DT::formatRound(
+                  dt,
+                  columns = "F",
+                  digits = 3
+                )
+              }
+
+              probability_columns <- intersect(
+                c("PValue", "FDR"),
+                colnames(display)
+              )
+
+              if (length(probability_columns) > 0L) {
+                dt <- DT::formatSignif(
+                  dt,
+                  columns = probability_columns,
+                  digits = 3
+                )
+              }
+
+              dt
+            },
+            server = TRUE
+          )
+        })
+      }
+
+      invisible(resolved_tests)
+    }
+  )
+}

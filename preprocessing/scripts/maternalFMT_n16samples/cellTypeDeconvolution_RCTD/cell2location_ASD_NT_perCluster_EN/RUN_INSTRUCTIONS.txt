@@ -1,0 +1,55 @@
+RUN INSTRUCTIONS — cell2location (16 mouse brain Visium sections)
+
+1. Unzip all files into:
+
+/home/mateusz/mnt/ippas-kunevicius-spatial/preprocessing/scripts/
+maternalFMT_n16samples/cellTypeDeconvolution_RCTD/cell2location/
+
+Keep the shell, R, and Python scripts and the metadata TSV in the same folder.
+
+2. Run in a terminal:
+
+cd /home/mateusz/mnt/ippas-kunevicius-spatial/preprocessing/scripts/maternalFMT_n16samples/cellTypeDeconvolution_RCTD/cell2location
+bash 00_run_all.sh
+
+By default, 00_run_all.sh sets PROJECT_ROOT to:
+/home/mateusz/mnt/ippas-kunevicius-spatial
+
+3. Optional: override the project root and model settings:
+
+PROJECT_ROOT=/your/project/path N_CELLS_PER_LOCATION=8 C2L_MAX_EPOCHS=12000 bash 00_run_all.sh
+
+4. Requirements and first-run setup:
+
+- An internet connection is needed for the initial Python package installation
+  and reference signature download.
+- Python 3 with venv, Rscript, and these R packages must be available:
+  Seurat, SeuratObject, Matrix, data.table, and R.utils.
+- 00_run_all.sh creates <PROJECT_ROOT>/.venv-cell2location and installs
+  Python dependencies there. The first installation can take time and disk space.
+- A CPU-only run across all 16 sections may be lengthy.
+
+5. Outputs are written to:
+
+<PROJECT_ROOT>/results/maternalFMT_n16samples/cellTypeDeconvolution_cell2location/mouseBrain59/
+
+6. Read METHODS_AND_PARAMETERS.txt before interpreting results. The pipeline
+has not been validated end-to-end using your actual Seurat file, and current
+section-level comparisons are exploratory if several sections come from the
+same animal.
+
+IMPORTANT: If inputs or training parameters change, previous per-section
+results can be skipped due to the pipeline's resume mechanism. Avoid mixing
+outputs generated with different parameter configurations.
+
+7. After deconvolution, script 03 automatically runs ASD vs Neurotypical
+   comparisons both for whole sections and within Leiden clusters.
+
+If deconvolution has already finished and you only want to rerun the
+statistical comparisons (from this scripts folder), use:
+
+<PROJECT_ROOT>/.venv-cell2location/bin/python 03_compare_ASD_vs_Neurotypical.py
+
+All 59 populations are included in the tests. The ten most abundant ones are
+selected for figures only. Per-cluster primary FDR is adjusted globally across
+all testable cluster-by-cell-type comparisons.

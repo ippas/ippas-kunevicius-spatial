@@ -1,0 +1,21 @@
+sample_ID	slide_ID	slide_area	experiment	mouse_genotype	fmt_donor_group	sex	notes
+2_1Md	V12N14-297	A1	MaternalFMT	wt	ASD	Male	FASTQ files for 2_1M and 2_1Md were swapped based on the spatial data overlay on the corresponding tissue images.
+13_1M	V12N14-297	B1	MaternalFMT	wt	ASD	Male	
+12_1M	V12N14-297	C1	MaternalFMT	wt	ASD	Male	
+18_1M	V12N14-297	D1	MaternalFMT	wt	ASD	Male	
+2_1M	V12N14-298	A1	MaternalFMT	wt	Neurotypical	Male	FASTQ files for 2_1M and 2_1Md were swapped based on the spatial data overlay on the corresponding tissue images.
+3_1M	V12N14-298	B1	MaternalFMT	wt	Neurotypical	Male	
+1_1M	V12N14-298	C1	MaternalFMT	wt	Neurotypical	Male	
+5_1M	V12N14-298	D1	MaternalFMT	wt	ASD	Male	
+15_1F	V12N14-324	A1	MaternalFMT	wt	ASD	Female	
+23_1F	V12N14-324	B1	MaternalFMT	wt	ASD	Female	
+5_3F	V12N14-324	C1	MaternalFMT	wt	ASD	Female	
+18_1F	V12N14-324	D1	MaternalFMT	wt	ASD	Female	
+1_1F	V12N14-292	A1	MaternalFMT	wt	Neurotypical	Female	
+3_1F	V12N14-292	B1	MaternalFMT	wt	Neurotypical	Female	
+13_1F	V12N14-292	C1	MaternalFMT	wt	ASD	Female	
+1_1Fd	V12N14-292	D1	MaternalFMT	wt	Neurotypical	Female	
+20_1F	V12N14-348	A1	MaternalFMT	wt	ASD	Female	
+12_3F	V12N14-348	B1	MaternalFMT	wt	ASD	Female	
+15_1M	V12N14-348	C1	MaternalFMT	wt	ASD	Male	
+20_3M	V12N14-348	D1	MaternalFMT	wt	ASD	Male	

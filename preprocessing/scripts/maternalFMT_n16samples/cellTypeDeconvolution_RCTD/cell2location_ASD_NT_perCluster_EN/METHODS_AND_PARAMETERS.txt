@@ -1,0 +1,206 @@
+METHODS AND PARAMETERS
+cell2location | maternalFMT_n16samples | Mouse brain (59 reference populations)
+Documentation updated: October 20, 2026
+
+Applies to:
+  00_run_all.sh
+  01_export_visium.R
+  02_cell2location_full.py
+  03_compare_ASD_vs_Neurotypical.py
+
+1. PURPOSE
+
+Estimate cell-type composition in 16 mouse brain 10x Visium tissue sections
+using published mouse brain snRNA-seq reference signatures and cell2location.
+Compare ASD versus neurotypical samples both across whole sections and within
+spatial Leiden clusters. This analysis does not overwrite the earlier RCTD
+analysis based on 14 broad cell populations.
+
+2. SPATIAL DATA AND REFERENCE
+
+- Spatial input: a previously generated Seurat RData object. The analysis
+  exports the RAW RNA count layers, not log-normalized expression values,
+  CCA embeddings, or Crescendo-adjusted expression values.
+- The Seurat object is expected at:
+  <PROJECT_ROOT>/results/maternalFMT_n16samples/seurat_clustering_analysis/
+  logNormalize_vst/hvg2000/02_cca/dims20/k20/prune0067/RData/
+  02_maternalFMT_n16samples_logNormalizeVst_hvg2000_
+  ccaDims20K20PruneSNN0067_res010to100by010_multiClusteringAndUmap.RData
+- Seurat metadata columns: sample_ID and leiden_res0.40.
+- Reference: previously fitted, published mouse brain snRNA-seq expression
+  signatures for 59 populations from the official cell2location example.
+  The pipeline downloads the supplied sc.h5ad file from:
+  https://cell2location.cog.sanger.ac.uk/tutorial/mouse_brain_snrna/regression_model/RegressionGeneBackgroundCoverageTorch_65covariates_40532cells_12819genes/sc.h5ad
+- The file name refers to 40,532 cells and 12,819 genes; the current pipeline
+  DOES NOT retrain the reference regression model from raw snRNA-seq counts.
+- Signatures are extracted from the means_cov_effect_annotation_1_* columns
+  of the reference raw.var table. Exactly 59 populations are expected.
+- Matching of expression signatures to Visium genes uses Ensembl IDs or gene
+  symbols, whichever produces greater overlap. Duplicate gene symbols in
+  the reference are excluded when symbol matching is selected.
+- Reference signatures are multiplied by the mean sample_scaling parameter,
+  following the official example; mitochondrial genes with an mt- prefix
+  are excluded from spatial mapping.
+- At least 3,000 overlapping genes are required per section. If there are
+  fewer, the pipeline stops for investigation.
+
+3. EXPORTING 16 SECTIONS (01_export_visium.R)
+
+The sections are:
+  1_1F, 1_1Fd, 1_1M, 2_1M, 2_1Md, 3_1F, 3_1M, 5_1M, 5_3F,
+  12_1M, 13_1F, 13_1M, 15_1F, 18_1F, 18_1M, 23_1F.
+
+For each sample, the script writes:
+  matrix.mtx.gz   Raw RNA counts in Matrix Market format
+  genes.tsv       Gene identifiers
+  spots.tsv       Spot IDs, sample IDs, and Leiden cluster assignments
+
+Before exporting, it checks that all requested spots are present, raw counts
+are nonnegative and integer-valued, and gene orders match across RNA layers.
+
+IMPORTANT: In this implementation, each section is fitted SEPARATELY; there
+is no joint spatial model or joint batch-effect model across the 16 sections.
+
+4. cell2location SETTINGS (02_cell2location_full.py)
+
+  N_CELLS_PER_LOCATION   = 8       Expected cells per Visium spot (model prior)
+  detection_alpha        = 20      Prior on spatial detection variability
+  C2L_MAX_EPOCHS         = 12000   Training epoch limit, per section
+  C2L_BATCH_SIZE         = 1024    min(1024, number of spots)
+  train_size             = 1       All spots used to fit each section model
+  posterior num_samples = 1000    Posterior sampling configuration
+  posterior batch_size  = min(1024, number of spots)
+  SEED                   = 7       NumPy and PyTorch seeds
+  Device                 = GPU when PyTorch reports one; otherwise CPU
+  Input                  = Raw RNA counts in AnnData format
+  Reference              = Published 59-population signatures
+  Number of models       = 16 (one per tissue section)
+
+N_CELLS_PER_LOCATION = 8 is a modeling assumption drawn from a mouse brain
+example, NOT a direct count of nuclei in these particular sections. Roughly
+5,000 Visium spots per section does not mean 5,000 cells per spot.
+
+Values can be overridden without changing the script, for example:
+  N_CELLS_PER_LOCATION=8 C2L_MAX_EPOCHS=5000 C2L_BATCH_SIZE=512 bash 00_run_all.sh
+
+Environment variables: PROJECT_ROOT, N_CELLS_PER_LOCATION, C2L_MAX_EPOCHS,
+C2L_BATCH_SIZE. The default PROJECT_ROOT is defined in 00_run_all.sh.
+
+5. ESTIMATING PROPORTIONS
+
+- The cell2location model estimates posterior mean cell abundances in
+  a.obsm['means_cell_abundance_w_sf'].
+- Within each spot, population proportion = estimated population abundance
+  divided by the sum of estimated abundances across all 59 populations.
+- Proportions therefore sum to 1 within each spot.
+- Whole-section proportion = arithmetic mean across all spots in that section.
+- Per-cluster proportion = arithmetic mean across spots from that cluster
+  within a given section.
+- These are model-based estimates, NOT directly observed histological counts.
+- Script 03 produces two PDF plots for the ten most abundant populations:
+  a section-level dot plot and a cluster-level group-difference heatmap.
+  This pipeline does not generate spot-level spatial PDF maps.
+
+6. ASD VERSUS NEUROTYPICAL COMPARISONS
+   (03_compare_ASD_vs_Neurotypical.py)
+
+- Supplied metadata indicate 10 ASD and 6 neurotypical sections.
+- The corrected group labels are 2_1Md = ASD and 2_1M = Neurotypical.
+  The metadata record an associated FASTQ-swap note.
+- Unit of observation: mean estimated proportion in one tissue section.
+- Tests: two-sided Welch's t-test (unequal variances) and two-sided
+  Mann-Whitney U test.
+- Whole section: test each of the 59 reference populations and perform
+  Benjamini-Hochberg correction across all testable cell-type hypotheses.
+- Per cluster: test every cluster-by-cell-type combination. The PRIMARY FDR
+  is Benjamini-Hochberg corrected across ALL testable combinations globally
+  (up to 16 clusters x 59 populations = 944 tests). A secondary within-cluster
+  Benjamini-Hochberg FDR is also reported.
+- For each testable group comparison, at least 3 sections must be represented
+  in EACH condition. Otherwise, the p-value is recorded as missing (NA).
+- FDR is calculated separately for Welch's test and Mann-Whitney U test.
+- No arbitrary rare-cell population filter is applied to hypothesis testing.
+- The ten most abundant populations across all 16 sections are selected for
+  FIGURES ONLY, independently of ASD/NT labels and p-values. The FDR
+  correction is NOT repeated for the selected ten populations.
+- Absolute group difference (percentage points):
+      100 x (mean estimated ASD proportion - mean NT proportion)
+- Relative group change (%):
+      100 x (mean ASD proportion / mean NT proportion - 1), when NT > 0.
+- The current pipeline does not implement beta regression, sex adjustment,
+  animal-level mixed effects, or an explicit batch-effect term.
+- Several sections may originate from the same mouse. Treating sections as
+  independent observations constitutes pseudoreplication for confirmatory
+  animal-level inference. The current section-level p-values and FDRs MUST
+  therefore be interpreted as EXPLORATORY.
+- A null result (no significant differences after FDR correction) is valid.
+
+7. OUTPUT DIRECTORY AND FILES
+
+<PROJECT_ROOT>/results/maternalFMT_n16samples/
+  cellTypeDeconvolution_cell2location/mouseBrain59/
+
+  inputs/<sample>/      Exported Seurat count matrix, gene list, spot metadata
+  perSpot/              *_cell2location_proportions.tsv.gz
+                        *_estimated_cell_abundance.tsv.gz
+  perCluster/           allSamples_n16_cellTypeProportions_perCluster.tsv
+                        ASD_vs_Neurotypical_perCluster_allTypes_stats.tsv
+                        ASD_vs_Neurotypical_perCluster_top10_FOR_FIGURES.tsv
+                        top10_perCluster_delta_percentage_points.pdf
+  wholeSection/         allSamples_n16_cellTypeProportions_sectionSummary.tsv
+                        ASD_vs_Neurotypical_allTypes_stats.tsv
+                        ASD_vs_Neurotypical_top10_FOR_FIGURES.tsv
+                        top10_proportions_by_sample.pdf
+                        ASD_vs_Neurotypical_stats.tsv (legacy output from script 02)
+  models/<sample>/      Trained cell2location models
+  qc/                   reference_signatures.tsv; run_parameters.tsv;
+                        cellType_abundanceRanking_groupBlind.tsv;
+                        statistical_analysis_summary.txt
+  run.log               Execution log
+
+8. LIMITATIONS AND VALIDATION STATUS
+
+- This pipeline uses published fitted signatures instead of retraining
+  a fresh snRNA-seq regression model.
+- The reference may not represent all populations present in these sections.
+- Fitting one model per section can affect cross-section comparability;
+  these results do not replace a validated joint multi-section model.
+- A complete end-to-end run on the user's actual Seurat RData has NOT been
+  performed in this environment. Previous checks covered Python/shell
+  syntax and synthetic testing of the statistical stage.
+- 00_run_all.sh installs cell2location>=0.1.4 and other packages without
+  fully pinning dependencies; installed versions should be recorded for
+  reproducibility after a successful run.
+- CPU execution of 16 models can take a substantial amount of time.
+- Existing per-section files are skipped during reruns. Changing model
+  parameters requires removing or isolating old section results, rather
+  than accidentally mixing outputs generated with different settings.
+
+9. DRAFT METHODS PARAGRAPH (ENGLISH)
+
+"Cell-type composition of mouse brain Visium sections was estimated using
+cell2location and previously fitted mouse brain snRNA-seq reference signatures
+for 59 cell populations. Raw RNA count matrices were processed separately for
+16 sections. The spatial model assumed an expected abundance of eight cells
+per spot (N_cells_per_location = 8) and detection_alpha = 20. Posterior mean
+cell abundances were normalized to sum to one within each spot and then
+averaged per section or spatial Leiden cluster. Exploratory comparisons of ASD
+and neurotypical sections used Welch's t-test and the Mann-Whitney U test,
+with Benjamini-Hochberg correction across cell populations for whole-section
+comparisons and across all cluster-by-cell-type combinations for cluster-
+specific analyses. The ten most abundant populations, selected independently
+of experimental condition, were displayed in figures but did not define the
+set of tested hypotheses."
+
+This paragraph should be used only AFTER the pipeline has run successfully.
+Before submission, report actual installed software versions and any changed
+parameters, and address biological replication in the inferential analysis.
+
+10. REFERENCES
+
+Kleshchevnikov et al. Cell2location maps fine-grained cell types in spatial
+transcriptomics. Nature Biotechnology (2022).
+Official mouse brain example:
+  https://cell2location.readthedocs.io/en/latest/notebooks/cell2location_short_demo.html
+cell2location model description:
+  https://cell2location.readthedocs.io/en/latest/cell2location.html

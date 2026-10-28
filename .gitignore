@@ -2,8 +2,17 @@
 /data
 /results
 /tools
-
+/tmp
+/archive
 ########## R.gitignore ##########
+
+# Python virtual environments
+.venv-cell2location/
+.venv/
+venv/
+
+# Local R configuration
+.Rprofile
 
 # History files
 .Rhistory
