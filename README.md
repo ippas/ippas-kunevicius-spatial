@@ -99,4 +99,4 @@ Shared functions ([`preprocessing/src/`](https://github.com/ippas/ippas-kunevici
 
 ## Software
 
-R 4.5.2 · Seurat 5.5.1 · Harmony 2.0.5 · Crescendo 1.0 · edgeR 4.8.2 · Python 3.14.4 (SciPy 1.18.1) · Space Ranger 4.0.1
+R 4.5.2 · Seurat 5.5.1 · Harmony 2.0.5 · Crescendo 1.0 · edgeR 4.8.2 · Python 3.14.4 (SciPy 1.18.1) · Space Ranger 4.1.0
